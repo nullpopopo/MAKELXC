@@ -1,0 +1,139 @@
+#!/bin/bash
+LANG=C
+set -e
+
+# 環境変数設定
+ETC=${HOME}/etc
+PACKAGES=${ETC}/lxc/lxc-packages
+TEMPLATEDIR=${ETC}/lxc/template
+SEED=centos-release-6-4.el6.centos.10.x86_64.rpm
+SEEDURL=http://mirrors.kernel.org/centos/6/os/x86_64/Packages/${SEED}
+SEEDARC=centos6-lxc-root.tgz
+
+# パッケージリストがなければ異常終了
+[ ! -f ${PACKAGES} ] && exit 128
+
+# テンプレートディレクトリ作成
+[ -d ${TEMPLATEDIR} ] && sudo mv ${TEMPLATEDIR} ${TEMPLATEDIR}.$(date +%Y%m%d%H%M%S)
+[ ! -d ${TEMPLATEDIR} ] && sudo mkdir -p ${TEMPLATEDIR}
+
+# 種からファイル抽出
+cd ${TEMPLATEDIR}
+sudo wget ${SEEDURL}
+sudo rpm2cpio ${SEED} | sudo cpio -idm
+
+# リポジトリファイル変更
+cd ${TEMPLATEDIR}/etc/yum.repos.d/
+for A in $(ls *.repo)
+do
+  sudo sed -i 's/$releasever/6/g' $A
+done
+
+# パッケージ群インストール
+cd ${TEMPLATEDIR}
+sudo yum -y --installroot=$(pwd) install $(cat ${PACKAGES})
+sudo mv ${SEED} ../
+
+# デバイスファイル作成
+cd ${TEMPLATEDIR}/dev
+sudo rm -f null
+sudo mknod -m 666 null c 1 3
+sudo mknod -m 666 zero c 1 5
+sudo mknod -m 666 urandom c 1 9
+sudo ln -s urandom random
+sudo mknod -m 600 console c 5 1
+sudo mknod -m 660 tty1 c 4 1
+sudo chown root:tty tty1
+sudo mkdir -p shm
+sudo chmod 1777 shm
+sudo mkdir -p pts
+sudo chmod 755 pts
+
+# rootユーザ環境設定
+cd ${TEMPLATEDIR}
+sudo cp -a etc/skel/. root/.
+
+# resolv.conf作成
+cd ${TEMPLATEDIR}/etc
+sudo touch resolv.conf
+sudo chmod 666 resolv.conf
+echo "nameserver 8.8.8.8" > resolv.conf
+echo "nameserver 8.8.4.4" >> resolv.conf
+sudo chmod 644 resolv.conf
+
+# hosts作成
+cd ${TEMPLATEDIR}/etc
+sudo touch hosts
+sudo chmod 666 hosts
+echo "127.0.0.1   localhost localhost.localdomain localhost4 localhost4.localdomain4" > hosts
+echo "::1         localhost localhost.localdomain localhost6 localhost6.localdomain6" >> hosts
+sudo chmod 644 hosts
+
+# ifcfg-eth0作成
+cd ${TEMPLATEDIR}/etc/sysconfig
+sudo touch network
+sudo chmod 666 network
+cat > network << END
+NETWORKING=yes
+HOSTNAME=localhost.localdomain
+END
+sudo chmod 644 network
+
+# ifcfg-eth0作成
+cd ${TEMPLATEDIR}/etc/sysconfig/network-scripts/
+sudo touch ifcfg-eth0
+sudo chmod 666 ifcfg-eth0
+cat > ifcfg-eth0 << END
+DEVICE="eth0"
+IPADDR="10.0.10.200"
+NETMASK="255.255.255.0"
+GATEWAY="10.0.10.1"
+ONBOOT="yes"
+TYPE="Ethernet"
+END
+sudo chmod 644 ifcfg-eth0
+
+# fstabファイル作成
+cd ${TEMPLATEDIR}/etc
+sudo touch fstab
+sudo chmod 666 fstab
+cat > fstab << END
+/dev/root               /                       rootfs   defaults        0 0
+none                    /dev/shm                tmpfs    nosuid,nodev    0 0
+END
+sudo chmod 644 fstab
+
+# lxc-sysinit.confファイル作成
+cd ${TEMPLATEDIR}/etc/init
+sudo touch lxc-sysinit.conf
+sudo chmod 666 lxc-sysinit.conf
+cat > lxc-sysinit.conf << END
+start on startup
+env container
+pre-start script
+        if [ "x$container" != "xlxc" -a "x$container" != "xlibvirt" ]; then
+                stop;
+        fi
+        telinit 3
+        initctl start tty TTY=console
+        exit 0;
+end script
+END
+
+# rootパスワード作成
+cd ${TEMPLATEDIR}/etc/
+sudo mkdir BACKUP
+sudo cp -p passwd* BACKUP
+sudo cp -p shadow* BACKUP
+sudo cp -p group BACKUP
+sudo cp -p gshadow BACKUP
+sudo grep ^root /etc/passwd > /tmp/PASSWD_$$
+sudo grep -v ^root passwd >> /tmp/PASSWD_$$
+sudo grep ^root /etc/shadow > /tmp/SHADOW_$$
+sudo grep -v ^root shadow >> /tmp/SHADOW_$$
+sudo mv /tmp/PASSWD_$$ passwd
+sudo mv /tmp/SHADOW_$$ shadow
+
+# テンプレートアーカイブ作成
+cd ${TEMPLATEDIR}
+sudo tar cvfz ../${SEEDARC} .
